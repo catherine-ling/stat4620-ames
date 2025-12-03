@@ -1,0 +1,251 @@
+---
+title: "STAT4620 Project"
+author: "Catherine Ling.273"
+date: "2025-12-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, echo = TRUE, message = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(GGally)
+library(corrplot)
+
+ames <- read_csv("train.csv", show_col_types = FALSE)
+
+glimpse(ames)
+```
+
+# Part I: Exploratory Data Analysis
+
+## Dataset Introduction
+
+The Ames Housing dataset contains residential home sales in Ames, Iowa from 2006–2010 and includes 79 predictors describing lot characteristics, house quality, building type, square footage, basement and garage features, and neighborhood information. The response variable for modeling is SalePrice, the sale price of each home in USD.
+
+The dataset contains a mixture of numeric, ordinal, and nominal variables. Its initial state: 
+
+```{r}
+# summary statistics
+summary(ames)
+
+# split by variable type
+numeric_vars <- ames %>% select(where(is.numeric))
+categorical_vars <- ames %>% select(where(~ !is.numeric(.)))
+
+```
+## Missing Data
+
+several variables contain missing values, but many of these are structural (“feature not present”) rather than incomplete. For example, if a house has no basement, basement quality fields are NA.
+
+
+```{r}
+missing_summary <- ames %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "missing") %>%
+  arrange(desc(missing))
+
+missing_summary
+```
+
+Findings:
+
+- Variables with very high missingness include PoolQC, MiscFeature, Alley, and Fence, which is expected because most homes do not have pools, miscellaneous features, alleys, and fences
+
+- Basement and garage quality variables also include NAs for homes without basements or garages
+
+- LotFrontage has ~18% missingness, representing true unobserved data rather than a structural “None”
+
+```{r}
+# convert known structural NAs to "None"
+ames <- ames %>%
+  mutate(
+    Alley        = replace_na(Alley, "None"),
+    PoolQC       = replace_na(PoolQC, "None"),
+    Fence        = replace_na(Fence, "None"),
+    MiscFeature  = replace_na(MiscFeature, "None"),
+    FireplaceQu  = replace_na(FireplaceQu, "None"),
+    GarageType   = replace_na(GarageType, "None"),
+    GarageFinish = replace_na(GarageFinish, "None"),
+    GarageQual   = replace_na(GarageQual, "None"),
+    GarageCond   = replace_na(GarageCond, "None"),
+    BsmtQual     = replace_na(BsmtQual, "None"),
+    BsmtCond     = replace_na(BsmtCond, "None"),
+    BsmtExposure = replace_na(BsmtExposure, "None"),
+    BsmtFinType1 = replace_na(BsmtFinType1, "None"),
+    BsmtFinType2 = replace_na(BsmtFinType2, "None")
+  )
+```
+
+## Distribution of Variables 
+
+**SalePrice**
+
+One notable issue is that SalePrice is heavily right-skewed, which violates the normality assumption of linear regression. 
+
+```{r}
+# histograms
+ggplot(ames, aes(x = SalePrice)) +
+  geom_histogram(bins = 40, fill = "blue") +
+  labs(title = "SalePrice")
+```
+
+A log-transformation produces a much more symmetric distribution:
+
+```{r}
+# log transformation to normalize
+ames <- ames %>% mutate(LogSalePrice = log(SalePrice))
+
+ggplot(ames, aes(x = LogSalePrice)) +
+  geom_histogram(bins = 40, fill = "red") +
+  labs(title = "log(SalePrice)")
+```
+
+Skewness suggests that data transformations (e.g., log) or models that don't require linearity would be best suited for this dataset. 
+
+**Numeric Variables**
+
+```{r}
+key_numeric <- c("GrLivArea", "TotalBsmtSF", "GarageArea", "LotArea",
+                 "X1stFlrSF", "X2ndFlrSF", "OverallQual")
+
+key_numeric <- intersect(key_numeric, names(ames))
+
+for (var in key_numeric) {
+  print(
+    ggplot(ames, aes_string(x = var)) +
+      geom_histogram(bins = 40, fill = "gray") +
+      labs(title = paste("Distribution of", var))
+  )
+}
+```
+
+## Relationships with SalePrice
+
+**Size/area variables**
+```{r}
+# scatterplots for numeric predictors
+size_vars <- intersect(c("GrLivArea", "TotalBsmtSF", "GarageArea", "X1stFlrSF"), names(ames))
+
+for (var in size_vars) {
+  print(
+    ggplot(ames, aes_string(x = var, y = "SalePrice")) +
+      geom_point(alpha = 0.5) +
+      geom_smooth(method = "lm", se = FALSE) +
+      labs(title = paste("SalePrice vs", var))
+  )
+}
+```
+
+- GrLivArea and TotalBsmtSF show strong positive linear trends.
+
+- Outliers exist for very large homes (>4000 sq ft).
+
+
+**Quality**
+```{r}
+# overallQual boxplot
+if ("OverallQual" %in% names(ames)) {
+  ggplot(ames, aes(x = factor(OverallQual), y = SalePrice)) +
+    geom_boxplot() +
+    labs(title = "SalePrice by OverallQual")
+}
+```
+
+Higher OverallQual correlates strongly with higher prices, showing a step-like increase.
+
+
+**Neighborhood**
+```{r}
+# neighborhood boxplot
+if ("Neighborhood" %in% names(ames)) {
+  ggplot(ames, aes(x = reorder(Neighborhood, SalePrice, FUN = median),
+                   y = SalePrice)) +
+    geom_boxplot() +
+    coord_flip() +
+    labs(title = "SalePrice by Neighborhood")
+}
+```
+
+Neighborhoods differ substantially in median home value, implying they are relatively important predictors.
+
+## Correlation & Collinearity
+
+```{r}
+cor_matrix <- numeric_vars %>% cor(use = "pairwise.complete.obs")
+
+# correlation with SalePrice
+cor_with_price <- sort(cor_matrix[,"SalePrice"], decreasing = TRUE)
+cor_with_price
+
+# top correlated predictors
+top_corr <- names(head(cor_with_price, 10))
+```
+Strongest correlations: 
+- OverallQual (0.79)
+- GrLivArea (0.71)
+- GarageCars, GarageArea, TotalBsmtSF, 1stFlrSF (~0.60 - 0.64)
+
+
+multicollinearity among top predictors: 
+```{r}
+cor_top <- numeric_vars %>%
+  select(all_of(top_corr)) %>%
+  cor(use = "pairwise.complete.obs")
+
+# heatmap
+corrplot(cor_top, method = "color", type = "upper",
+         tl.col = "black", tl.srt = 45)
+
+# pairs plot
+GGally::ggpairs(ames, columns = top_corr)
+
+```
+
+- GarageCars and GarageArea are highly collinear
+
+- 1stFlrSF and TotalBsmtSF are strongly correlated
+
+- Quality ratings like OverallQual correlate with other quality-related scores
+
+Collinearity suggests models with regularization (Ridge/LASSO) or selective variable inclusion would work best. 
+
+## Other Problems
+
+**Zero-inflation** 
+
+Several variables contain mostly zeros: 
+
+```{r}
+zero_vars <- intersect(c("PoolArea", "MiscVal", "ScreenPorch",
+                         "EnclosedPorch", "LowQualFinSF"), names(ames))
+
+for (var in zero_vars) {
+  zero_prop <- mean(ames[[var]] == 0)
+  cat(var, "- proportion zeros:", round(zero_prop, 3), "\n")
+  
+  print(
+    ggplot(ames, aes_string(x = var)) +
+      geom_histogram(bins = 40, fill = "gray50") +
+      labs(title = paste("Distribution of", var))
+  )
+}
+```
+
+**Outliers**
+
+```{r}
+if ("GrLivArea" %in% names(ames)) {
+  ggplot(ames, aes(x = GrLivArea, y = SalePrice)) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method = "lm", se = FALSE) +
+    labs(title = "Outlier Check: GrLivArea vs SalePrice")
+
+  # view suspected outliers
+  ames %>% filter(GrLivArea > 4000) %>%
+    select(GrLivArea, SalePrice, OverallQual, Neighborhood)
+}
+```
+Houses with very large living area (>4000 sq ft) appear to be outliers and may disproportionately influence linear regression
