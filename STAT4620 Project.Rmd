@@ -13,6 +13,7 @@ knitr::opts_chunk$set(warning = FALSE, echo = TRUE, message = FALSE)
 library(tidyverse)
 library(GGally)
 library(corrplot)
+library(glmnet)
 
 ames <- read_csv("train.csv", show_col_types = FALSE)
 
@@ -249,3 +250,249 @@ if ("GrLivArea" %in% names(ames)) {
 }
 ```
 Houses with very large living area (>4000 sq ft) appear to be outliers and may disproportionately influence linear regression
+
+
+# Part II: Model Analysis - LASSO Regression
+
+
+## Motivation for Using LASSO
+
+The EDA revealed:
+
+- Many predictors are highly correlated (e.g., GarageCars with GarageArea, 1stFlrSF with TotalBsmtSF).
+
+- The dataset contains many potential predictors (~79).
+
+- Some predictors may be irrelevant or redundant.
+
+- Linear relationships appear strong, especially after transforming SalePrice.
+
+
+Because of this, ordinary least squares (OLS) would be unstable and prone to overfitting due to multicollinearity and high dimensionality.
+
+LASSO regression (Least Absolute Shrinkage and Selection Operator) performs:
+
+- Regularization -> improves generalization
+
+- Variable selection -> shrinks coefficients of unimportant variables to zero
+
+- Handles multicollinearity better than OLS
+
+Thus, LASSO is an appropriate modeling strategy for this dataset.
+
+
+**The LASSO Model**
+
+Given predictors $X_1, X_2, ..., X_p$ and response $y$, LASSO solves: 
+
+$$
+\hat{\beta} = \arg\min_\beta \left( \sum^n_{i=1}(y_i-\beta_0-\sum^p_{j=1} X_{ij} \beta_j)^2 + \lambda \sum^p_{j=1} |\beta_j| \right)
+$$
+
+where $\lambda \ge 0$ controls shrinkage.
+
+
+## Data Preparation
+
+Training data log-transform: 
+
+```{r}
+ames <- read_csv("train.csv") %>%
+  mutate(
+    log_price = log(SalePrice)
+  )
+```
+
+
+Handling missing values: 
+
+- for character predictors: replace NA with "None", then convert to factor
+- for numeric predictors (other than Id, SalePrice, log_price): median impute
+
+```{r}
+
+ames_clean <- ames %>%
+  # character -> "None" where NA
+  mutate(across(where(is.character), ~ replace_na(., "None"))) %>%
+  # now convert all characters to factors
+  mutate(across(where(is.character), factor))
+
+# numeric predictors (exclude Id, SalePrice, log_price)
+num_pred <- names(ames_clean)[sapply(ames_clean, is.numeric) &
+                                !(names(ames_clean) %in% c("Id", "SalePrice", "log_price"))]
+
+ames_clean <- ames_clean %>%
+  mutate(
+    across(all_of(num_pred),
+           ~ replace_na(., median(., na.rm = TRUE)))
+  )
+
+# drop factor columns with only ONE level
+fac_cols  <- sapply(ames_clean, is.factor)
+one_level <- names(ames_clean)[fac_cols][sapply(ames_clean[fac_cols], nlevels) < 2]
+
+ames_mod <- ames_clean %>%
+  select(-all_of(one_level),
+         -Id)   # Id is just a label, not a predictor
+
+```
+
+Building design matrix:
+
+```{r}
+X <- model.matrix(
+  log_price ~ . - SalePrice,  # all predictors except SalePrice (we use log_price)
+  data = ames_mod
+)[, -1]                        # drop intercept column; glmnet adds its own
+
+y <- ames_mod$log_price
+```
+
+
+## Fitting the Model
+
+```{r}
+set.seed(123)
+
+cv_lasso <- cv.glmnet(
+  X, y,
+  alpha  = 1,      # LASSO
+  nfolds = 10
+)
+
+lambda_min <- cv_lasso$lambda.min
+lambda_1se <- cv_lasso$lambda.1se
+
+lambda_min
+lambda_1se
+```
+
+
+
+
+Visualizing the CV curve: 
+
+```{r}
+plot(cv_lasso)
+```
+
+
+Fitting the final model: 
+
+```{r}
+lasso_model <- glmnet(X, y, alpha = 1, lambda = lambda_min)
+```
+
+Results: 
+
+```{r}
+coef_summary <- coef(lasso_model) %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column("Variable") %>%
+  rename(Coefficient = s0) %>%
+  filter(Coefficient != 0) %>%
+  arrange(desc(abs(Coefficient)))
+
+coef_summary
+```
+
+
+
+## Testing
+
+```{r}
+# read test data
+test <- read_csv("test_new.csv")
+
+# handle missing values and character variables the same way as training
+test_clean <- test %>%
+  # replace na in character columns with "none"
+  mutate(across(where(is.character), ~ replace_na(., "None"))) %>%
+  # convert characters to factors
+  mutate(across(where(is.character), factor))
+
+```
+
+```{r}
+# compute training medians for numeric predictors
+train_medians <- sapply(ames_clean[num_pred], median, na.rm = TRUE)
+
+# apply median imputation to numeric predictors in test using training medians
+for (v in num_pred) {
+  if (v %in% names(test_clean)) {
+    test_clean[[v]] <- replace_na(test_clean[[v]], train_medians[[v]])
+  }
+}
+
+# drop the same single-level factor columns and id as in training
+test_mod <- test_clean %>%
+  select(-all_of(one_level),
+         -Id)
+```
+
+```{r}
+# build model matrix for test data (no response in formula)
+X_test <- model.matrix(
+  ~ . - SalePrice,   # same predictor structure as training
+  data = test_mod
+)[, -1]              # drop intercept column
+
+# align test design matrix columns with training design matrix
+train_cols <- colnames(X)
+test_cols  <- colnames(X_test)
+
+# add any columns that are in training but missing in test (fill with zeros)
+missing_cols <- setdiff(train_cols, test_cols)
+if (length(missing_cols) > 0) {
+  X_test <- cbind(
+    X_test,
+    matrix(0, nrow(X_test), length(missing_cols),
+           dimnames = list(NULL, missing_cols))
+  )
+}
+
+# drop any extra columns that appear only in test
+extra_cols <- setdiff(colnames(X_test), train_cols)
+if (length(extra_cols) > 0) {
+  X_test <- X_test[, setdiff(colnames(X_test), extra_cols)]
+}
+
+# reorder columns to match training matrix exactly
+X_test <- X_test[, train_cols]
+
+```
+
+```{r}
+# predict log-price on the test set
+log_pred_test <- predict(lasso_model, newx = X_test, s = lambda_min)
+
+# convert back from log scale to saleprice
+saleprice_pred <- exp(log_pred_test)
+
+```
+
+```{r}
+# extract true saleprice from test set
+y_test <- test$SalePrice
+
+# compute rmse (root mean squared error)
+rmse <- sqrt(mean((y_test - saleprice_pred)^2))
+rmse
+
+# compute mae
+mae <- mean(abs(y_test - saleprice_pred))
+mae
+
+# compute r-squared
+sst <- sum((y_test - mean(y_test))^2)
+sse <- sum((y_test - saleprice_pred)^2)
+r_squared <- 1 - sse/sst
+r_squared
+
+```
+
+## Conclusion
+
+The LASSO model was trained on the training dataset and evaluated using a separate test dataset. Model performance on the test set was assessed using RMSE, MAE, and $R^2$. The model achieved an RMSE of \$31,110 and an MAE of \$15,727, indicating that predictions are typically within about \$16,000 of the true sale price, with some larger errors occurring. The test-set $R^2$ value of 0.85 shows that the model explains approximately 85% of the variability in housing prices on unseen data. Overall, these results indicate that the LASSO model generalizes well and provides strong predictive accuracy.
+
