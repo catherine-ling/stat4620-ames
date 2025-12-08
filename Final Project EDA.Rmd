@@ -1,0 +1,284 @@
+---
+title: "Final Project EDA"
+author: "Troy Crockett.179"
+date: "2025-12-03"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+rm(list = ls())
+
+train <- read.csv("train.csv", stringsAsFactors = FALSE)
+
+dim(train)
+names(train)
+str(train)
+
+summary(train$SalePrice)
+
+train$MSSubClass <- factor(train$MSSubClass)
+
+char_vars <- names(train)[sapply(train, is.character)]
+for (v in char_vars) {
+  train[[v]] <- factor(train[[v]])
+}
+
+train$logSalePrice <- log(train$SalePrice)
+
+na_counts <- sapply(train, function(x) sum(is.na(x)))
+na_counts <- sort(na_counts, decreasing = TRUE)
+na_counts[na_counts > 0]
+
+na_prop <- na_counts / nrow(train)
+na_prop[na_prop > 0]
+
+head(na_counts, 15)
+head(na_prop, 15)
+
+numeric_vars <- names(train)[sapply(train, is.numeric)]
+numeric_vars
+
+key_num <- c("SalePrice",
+             "GrLivArea",
+             "LotArea",
+             "TotalBsmtSF",
+             "GarageArea",
+             "YearBuilt",
+             "OverallQual",
+             "OverallCond")
+
+summary(train[, key_num])
+
+par(mfrow = c(2, 3))
+
+hist(train$SalePrice,
+     main = "Histogram of SalePrice",
+     xlab = "SalePrice",
+     col = "lightgray")
+
+hist(train$GrLivArea,
+     main = "Histogram of GrLivArea",
+     xlab = "GrLivArea",
+     col = "lightgray")
+
+hist(train$LotArea,
+     main = "Histogram of LotArea",
+     xlab = "LotArea",
+     col = "lightgray")
+
+hist(train$TotalBsmtSF,
+     main = "Histogram of TotalBsmtSF",
+     xlab = "TotalBsmtSF",
+     col = "lightgray")
+
+hist(train$GarageArea,
+     main = "Histogram of GarageArea",
+     xlab = "GarageArea",
+     col = "lightgray")
+
+hist(train$YearBuilt,
+     main = "Histogram of YearBuilt",
+     xlab = "YearBuilt",
+     col = "lightgray")
+
+par(mfrow = c(1, 1))
+
+hist(train$logSalePrice,
+     main = "Histogram of log(SalePrice)",
+     xlab = "log(SalePrice)",
+     col = "lightgray")
+
+par(mfrow = c(2, 2))
+
+boxplot(logSalePrice ~ OverallQual,
+        data = train,
+        main = "log(SalePrice) by OverallQual",
+        xlab = "OverallQual",
+        ylab = "log(SalePrice)")
+
+boxplot(logSalePrice ~ OverallCond,
+        data = train,
+        main = "log(SalePrice) by OverallCond",
+        xlab = "OverallCond",
+        ylab = "log(SalePrice)")
+
+neigh_counts <- sort(table(train$Neighborhood), decreasing = TRUE)
+neigh_top <- names(neigh_counts)[1:8]
+
+boxplot(logSalePrice ~ Neighborhood,
+        data = subset(train, Neighborhood %in% neigh_top),
+        main = "log(SalePrice) by Neighborhood (top 8)",
+        xlab = "Neighborhood",
+        ylab = "log(SalePrice)")
+
+boxplot(logSalePrice ~ KitchenQual,
+        data = train,
+        main = "log(SalePrice) by KitchenQual",
+        xlab = "KitchenQual",
+        ylab = "log(SalePrice)")
+
+par(mfrow = c(1, 1))
+
+nb_order <- with(train,
+                 reorder(Neighborhood, SalePrice, median, na.rm = TRUE))
+
+plot(nb_order, train$SalePrice,
+     main = "SalePrice by Neighborhood (ordered by median)",
+     xlab = "Neighborhood",
+     ylab = "SalePrice",
+     las = 2,
+     cex.axis = 0.6)
+
+par(mfrow = c(2, 2))
+
+plot(train$GrLivArea, train$logSalePrice,
+     main = "log(SalePrice) vs GrLivArea",
+     xlab = "GrLivArea",
+     ylab = "log(SalePrice)")
+abline(lm(logSalePrice ~ GrLivArea, data = train), col = "red")
+
+plot(train$TotalBsmtSF, train$logSalePrice,
+     main = "log(SalePrice) vs TotalBsmtSF",
+     xlab = "TotalBsmtSF",
+     ylab = "log(SalePrice)")
+abline(lm(logSalePrice ~ TotalBsmtSF, data = train), col = "red")
+
+plot(train$GarageArea, train$logSalePrice,
+     main = "log(SalePrice) vs GarageArea",
+     xlab = "GarageArea",
+     ylab = "log(SalePrice)")
+abline(lm(logSalePrice ~ GarageArea, data = train), col = "red")
+
+plot(train$YearBuilt, train$logSalePrice,
+     main = "log(SalePrice) vs YearBuilt",
+     xlab = "YearBuilt",
+     ylab = "log(SalePrice)")
+abline(lm(logSalePrice ~ YearBuilt, data = train), col = "red")
+
+par(mfrow = c(1, 1))
+
+cor_mat <- cor(train[, numeric_vars],
+               use = "pairwise.complete.obs")
+
+cor_with_price <- cor_mat[, "SalePrice"]
+cor_with_price <- sort(cor_with_price, decreasing = TRUE)
+cor_with_price
+
+cor(train$GrLivArea, train$TotRmsAbvGrd,
+    use = "pairwise.complete.obs")
+
+cor(train$GarageArea, train$GarageCars,
+    use = "pairwise.complete.obs")
+
+cor(train$TotalBsmtSF, train$X1stFlrSF,
+    use = "pairwise.complete.obs")
+
+boxplot(train$SalePrice,
+        main = "Boxplot of SalePrice",
+        ylab = "SalePrice")
+
+boxplot(train$GrLivArea,
+        main = "Boxplot of GrLivArea",
+        ylab = "GrLivArea")
+
+grliv_box <- boxplot.stats(train$GrLivArea)
+grliv_box$out
+
+which(train$GrLivArea %in% grliv_box$out)
+
+train[train$GrLivArea %in% grliv_box$out,
+      c("GrLivArea", "SalePrice", "Neighborhood", "OverallQual")]
+
+bsmt_qual_na <- ifelse(is.na(train$BsmtQual),
+                       "NoBasement",
+                       "HasBasement")
+bsmt_qual_na <- factor(bsmt_qual_na)
+
+boxplot(SalePrice ~ bsmt_qual_na,
+        data = train,
+        main = "SalePrice by basement presence",
+        xlab = "Basement presence",
+        ylab = "SalePrice")
+
+gar_present <- ifelse(is.na(train$GarageType),
+                      "NoGarage",
+                      "HasGarage")
+gar_present <- factor(gar_present)
+
+boxplot(SalePrice ~ gar_present,
+        data = train,
+        main = "SalePrice by garage presence",
+        xlab = "Garage presence",
+        ylab = "SalePrice")
+
+save(list = c("train",
+              "numeric_vars",
+              "cor_mat",
+              "cor_with_price",
+              "na_counts",
+              "na_prop"),
+     file = "eda_objects.RData")
+```
+
+SalePrice is very right skewed, but log(SalePrice) looks roughly normal.
+OverallQual has the strongest correlation with SalePrice, even stronger than square footage.
+GrLivArea, TotalBsmtSF, GarageArea, GarageCars, first floor square feet, and FullBath all have fairly strong positive correlations with SalePrice.
+Pairs like GrLivArea and TotRmsAbvGrd, GarageArea and GarageCars, and TotalBsmtSF and X1stFlrSF are highly correlated, so there is a lot of repeated size information.
+The neighborhood plot shows a clear price ladder: places like MeadowV, IDOTRR, BrDale, OldTown, and Edwards are on the low end, while Timber, Somerst, StoneBr, NoRidge, and NridgHt are on the high end.
+Having a basement and having a garage are both associated with noticeably higher SalePrice compared to houses without them.
+LotArea and a few of the size variables have extreme upper outliers, which show up clearly in the boxplots.
+Most missing values in PoolQC, Alley, Fence, MiscFeature, and some basement and garage variables seem to mean the house does not have that feature rather than true missing data.
+
+```{r}
+library(glmnet)
+
+miss_prop <- sapply(train, function(z) mean(is.na(z)))
+keep_vars <- names(train)[miss_prop <= 0.30]
+
+keep_vars <- union(keep_vars, "SalePrice")
+
+mod_data <- train[, keep_vars]
+
+mod_data <- mod_data[complete.cases(mod_data), ]
+
+y <- log(mod_data$SalePrice)
+
+X <- model.matrix(~ . - SalePrice, data = mod_data)[, -1]
+
+set.seed(1)
+n <- nrow(mod_data)
+test_idx <- sample(1:n, size = floor(0.2 * n))
+
+X_train <- X[-test_idx, ]
+y_train <- y[-test_idx]
+
+X_test <- X[test_idx, ]
+y_test <- y[test_idx]
+
+cv_ridge <- cv.glmnet(X_train, y_train,
+                      alpha = 0,
+                      nfolds = 10)
+
+plot(cv_ridge)
+
+best_lambda <- cv_ridge$lambda.min
+best_lambda
+
+ridge_fit <- glmnet(X_train, y_train,
+                    alpha = 0,
+                    lambda = best_lambda)
+
+pred <- as.numeric(predict(ridge_fit, newx = X_test))
+
+mse  <- mean((y_test - pred)^2)
+rmse <- sqrt(mse)
+
+mse
+rmse
+```
+Best lambda was 0.0397
+Test MSE was 0.00647
+Test RMSE was 0.0804
+Since we used log(SalePrice), an RMSE of about 0.08 basically means our typical prediction error is around 8 percent on the price.
