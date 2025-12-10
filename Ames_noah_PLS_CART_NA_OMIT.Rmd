@@ -1,0 +1,477 @@
+---
+title: "STAT4620 Project"
+author: "Catherine Ling.273"
+date: "2025-12-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, echo = TRUE, message = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(GGally)
+library(corrplot)
+library(scales)
+
+ames <- read_csv("train_Ames.csv", show_col_types = FALSE)
+#ames <- read.csv("/Users/noahekness/Desktop/STAT 4620/Final Project/AmesHousing.csv", header = TRUE)
+test_ames <-  read_csv("C:/Users/khale/Downloads/test_Ames.csv")
+
+#fix name matching
+setdiff(names(ames), names(test_ames))
+# fix difference in names
+
+name_map <- c(
+  "X1stFlrSF"   = "1stFlrSF",
+  "X2ndFlrSF"   = "2ndFlrSF",
+  "X3SsnPorch"  = "3SsnPorch"
+)
+
+names(test_ames) <- sapply(names(test_ames), function(nm) {
+  if (nm %in% names(name_map)) name_map[[nm]] else nm
+})
+glimpse(ames)
+```
+
+# Part I: Exploratory Data Analysis
+
+## Dataset Introduction
+
+The Ames Housing dataset contains residential home sales in Ames, Iowa from 2006–2010 and includes 79 predictors describing lot characteristics, house quality, building type, square footage, basement and garage features, and neighborhood information. The response variable for modeling is SalePrice, the sale price of each home in USD.
+
+The dataset contains a mixture of numeric, ordinal, and nominal variables. Its initial state: 
+
+```{r}
+# summary statistics
+summary(ames)
+
+# split by variable type
+numeric_vars <- ames %>% select(where(is.numeric))
+categorical_vars <- ames %>% select(where(~ !is.numeric(.)))
+
+```
+## Missing Data
+
+several variables contain missing values, but many of these are structural (“feature not present”) rather than incomplete. For example, if a house has no basement, basement quality fields are NA.
+
+
+```{r}
+missing_summary <- ames %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "missing") %>%
+  arrange(desc(missing))
+
+missing_summary
+```
+
+Findings:
+
+- Variables with very high missingness include PoolQC, MiscFeature, Alley, and Fence, which is expected because most homes do not have pools, miscellaneous features, alleys, and fences
+
+- Basement and garage quality variables also include NAs for homes without basements or garages
+
+- LotFrontage has ~18% missingness, representing true unobserved data rather than a structural “None”
+
+```{r}
+# convert known structural NAs to "None"
+ames <- ames %>%
+  mutate(
+    Alley        = replace_na(Alley, "None"),
+    PoolQC       = replace_na(PoolQC, "None"),
+    Fence        = replace_na(Fence, "None"),
+    MiscFeature  = replace_na(MiscFeature, "None"),
+    FireplaceQu  = replace_na(FireplaceQu, "None"),
+    GarageType   = replace_na(GarageType, "None"),
+    GarageFinish = replace_na(GarageFinish, "None"),
+    GarageQual   = replace_na(GarageQual, "None"),
+    GarageCond   = replace_na(GarageCond, "None"),
+    BsmtQual     = replace_na(BsmtQual, "None"),
+    BsmtCond     = replace_na(BsmtCond, "None"),
+    BsmtExposure = replace_na(BsmtExposure, "None"),
+    BsmtFinType1 = replace_na(BsmtFinType1, "None"),
+    BsmtFinType2 = replace_na(BsmtFinType2, "None")
+  )
+```
+
+## Distribution of Variables 
+
+**SalePrice**
+
+One notable issue is that SalePrice is heavily right-skewed, which violates the normality assumption of linear regression. 
+
+```{r}
+paste("Mean = ", round(mean(ames$SalePrice), 2))
+paste("Median = ", round(median(ames$SalePrice), 2))
+paste("Std Dev. = ", round(sd(ames$SalePrice), 2))
+```
+
+
+```{r}
+# histograms
+ggplot(ames, aes(x = SalePrice)) +
+  geom_histogram(bins = 40, fill = "blue") +
+  labs(title = "SalePrice")
+```
+
+A log-transformation produces a much more symmetric distribution:
+
+```{r}
+# log transformation to normalize
+ames <- ames %>% mutate(LogSalePrice = log(SalePrice))
+
+ggplot(ames, aes(x = LogSalePrice)) +
+  geom_histogram(bins = 40, fill = "red") +
+  labs(title = "log(SalePrice)")
+```
+
+Skewness suggests that data transformations (e.g., log) or models that don't require linearity would be best suited for this dataset. 
+
+**Numeric Variables**
+
+```{r}
+key_numeric <- c("Gr.Liv.Area", "Total.Bsmt.SF", "Garage.Area", "Lot.Area",
+                 "X1st.Flr.SF", "X2nd.Flr.SF", "Overall.Qual")
+
+key_numeric <- intersect(key_numeric, names(ames))
+
+for (var in key_numeric) {
+  print(
+    ggplot(ames, aes_string(x = var)) +
+      geom_histogram(bins = 40, fill = "gray") +
+      labs(title = paste("Distribution of", var))
+  )
+}
+```
+
+## Relationships with SalePrice
+
+**Size/area variables**
+```{r}
+# scatterplots for numeric predictors
+size_vars <- intersect(c("Gr.Liv.Area", "Total.Bsmt.SF", "Garage.Area", "X1st.Flr.SF"), names(ames))
+
+for (var in size_vars) {
+  print(
+    ggplot(ames, aes_string(x = var, y = "SalePrice")) +
+      geom_point(alpha = 0.5) +
+      geom_smooth(method = "lm", se = FALSE) +
+      labs(title = paste("SalePrice vs", var))
+  )
+}
+```
+
+- GrLivArea and TotalBsmtSF show strong positive linear trends.
+
+- Outliers exist for very large homes (>4000 sq ft).
+
+
+**Quality**
+```{r}
+# overallQual boxplot
+if ("Overall.Qual" %in% names(ames)) {
+  ggplot(ames, aes(x = factor(Overall.Qual), y = SalePrice)) +
+    geom_boxplot() +
+    labs(title = "SalePrice by OverallQual")
+}
+```
+
+Higher OverallQual correlates strongly with higher prices, showing a step-like increase.
+
+
+**Neighborhood**
+```{r}
+# neighborhood boxplot
+if ("Neighborhood" %in% names(ames)) {
+  ggplot(ames, aes(x = reorder(Neighborhood, SalePrice, FUN = median),
+                   y = SalePrice)) +
+    geom_boxplot() +
+    coord_flip() +
+    labs(title = "SalePrice by Neighborhood")
+}
+```
+
+Neighborhoods differ substantially in median home value, implying they are relatively important predictors.
+
+## Correlation & Collinearity
+
+```{r}
+cor_matrix <- numeric_vars %>% cor(use = "pairwise.complete.obs")
+
+# correlation with SalePrice
+cor_with_price <- sort(cor_matrix[,"SalePrice"], decreasing = TRUE)
+cor_with_price
+
+# top correlated predictors
+top_corr <- names(head(cor_with_price, 10))
+
+
+# Visualized (minus some to make cleaner)
+#ames_numeric <- numeric_vars %>%
+ # select(where(is.numeric), -PID, -EnclosedPorch, -MSSubClass, -KitchenAbvGr, -MoSold, -Order, -YrSold)
+
+ggcorr(ames_numeric)
+```
+Strongest correlations: 
+- OverallQual (0.79)
+- GrLivArea (0.71)
+- GarageCars, GarageArea, TotalBsmtSF, 1stFlrSF (~0.60 - 0.64)
+
+
+multicollinearity among top predictors: 
+```{r}
+cor_top <- numeric_vars %>%
+  select(all_of(top_corr)) %>%
+  cor(use = "pairwise.complete.obs")
+
+# heatmap
+corrplot(cor_top, method = "color", type = "upper",
+         tl.col = "black", tl.srt = 45)
+
+# pairs plot
+GGally::ggpairs(ames, columns = top_corr)
+
+```
+
+- GarageCars and GarageArea are highly collinear
+
+- 1stFlrSF and TotalBsmtSF are strongly correlated
+
+- Quality ratings like OverallQual correlate with other quality-related scores
+
+Collinearity suggests models with regularization (Ridge/LASSO) or selective variable inclusion would work best. 
+
+## Other Problems
+
+**Zero-inflation** 
+
+Several variables contain mostly zeros: 
+
+```{r}
+zero_vars <- intersect(c("PoolArea", "MiscVal", "ScreenPorch",
+                         "EnclosedPorch", "LowQualFinSF"), names(ames))
+
+for (var in zero_vars) {
+  zero_prop <- mean(ames[[var]] == 0)
+  cat(var, "- proportion zeros:", round(zero_prop, 3), "\n")
+  
+  print(
+    ggplot(ames, aes_string(x = var)) +
+      geom_histogram(bins = 40, fill = "gray50") +
+      labs(title = paste("Distribution of", var))
+  )
+}
+```
+
+**Outliers**
+
+```{r}
+if ("GrLivArea" %in% names(ames)) {
+  ggplot(ames, aes(x = GrLivArea, y = SalePrice)) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method = "lm", se = FALSE) +
+    labs(title = "Outlier Check: GrLivArea vs SalePrice")
+
+  # view suspected outliers
+  ames %>% filter(GrLivArea > 4000) %>%
+    select(GrLivArea, SalePrice, OverallQual, Neighborhood)
+}
+```
+Houses with very large living area (>4000 sq ft) appear to be outliers and may disproportionately influence linear regression
+
+
+
+# Part II: Model Building
+
+## Splitting Data
+
+75-25 split seems right but can change this
+```{r}
+set.seed(4620) # So we don't get different answers every time
+ames_clean <- na.omit(ames)
+#train_idx <- sample(1:nrow(ames), 0.75 * nrow(ames_clean))
+#train_data <- ames_clean[train_idx, ]
+#test_data <- ames_clean[-train_idx, ]
+```
+
+
+
+## PLS
+
+A PLS approach could apply well to model the sale price of a home because it can find relationships and handle multicollinearity well. It is better suited for prediction because it cares about the response variable y (SalePrice), unlike PCR. But, we do know that there are better options out there and this is just here for comparison.
+
+Setup for PLS:
+```{r}
+# install.packages("pls") # Run if not already installed, otherwise leave this commented out
+library(pls)
+
+# Only numerical in PLS
+train_numeric <- ames[, sapply(ames, is.numeric)] %>%
+  na.omit(train_numeric)
+test_numeric <- test_ames[, sapply(test_ames, is.numeric)] %>%
+  na.omit(test_numeric)
+
+names(train_numeric)
+if("LogSalePrice" %in% names(train_numeric)) {
+  train_numeric <- train_numeric[, !names(train_numeric) %in% "LogSalePrice"]
+}
+```
+
+PLS model:
+```{r}
+# Fit the model on training data
+fit.pls <- plsr(SalePrice ~., data=train_numeric, scale=TRUE, validation = "CV")
+summary(fit.pls)
+validationplot(fit.pls, val.type="MSEP")
+```
+It looks like 5-6 PLS components are suitable for fitting the Ames dataset. The Root Mean Squared Error of Prediction (sqrt(MSEP)) turns into overfitting after that and since house prices can be highly variable. 6 components is not that much and then we can explain > 87% of sale price, so we will select 6 components.
+
+Tuning:
+```{r}
+# Use 6 components
+fit.pls.final <- plsr(SalePrice ~., data=train_numeric, scale=TRUE, ncomp=6)
+
+# Predict on TEST data
+pls.pred <- predict(fit.pls.final, newdata=test_numeric, ncomp=6)
+
+# Calculate test error
+test_mse <- mean((as.vector(pls.pred) - test_numeric$SalePrice)^2)
+test_rmse <- sqrt(test_mse)
+
+print(paste("Test RMSE:", round(test_rmse, 2)))
+print(paste("Test MSE:", round(test_mse, 2)))
+print(paste("Error as %: ", round(test_rmse*100/180796.06, 2)))
+```
+
+We can see that PLS appears to have a manageable RMSE with notably fewer components, although the test MSE still seems incredibly high. The error (in regards to the mean sale price) is about 22.5%. We will probably not move on with this one, but it is good to consider.
+
+
+This can easily be taken out but it is to see if the important weights align with the expected variables from correlation in the EDA stage.
+```{r}
+# Get loading weights
+loadings <- loading.weights(fit.pls.final)
+
+# For the first component (usually most important)
+comp1_loadings <- loadings[, 1]
+comp1_sorted <- sort(abs(comp1_loadings), decreasing = TRUE)
+print(head(comp1_sorted, 15))
+
+# Visualize
+barplot(head(comp1_sorted, 15), las=2, 
+        main="Top Variables - Component 1 Loading Weights",
+        cex.names=0.7, col="darkgreen")
+```
+
+# CART Regression Tree
+```{r}
+library(ISLR2)
+library(rpart)
+library(rpart.plot)
+## CART/Random Forest
+
+top_numeric <- c("GrLivArea", "TotalBsmtSF", "GarageArea", "OverallQual", "YearBuilt", "LotArea")
+
+top_categorical <- c("Neighborhood", "HouseStyle", "OverallQual", "KitchenQual")
+
+top <- c(top_numeric, top_categorical)
+top
+
+# reformulate to properly use vector `top`
+formulation <- reformulate(termlabels = top, response = "SalePrice")
+
+#fit model to regression tree
+fit.cart <- rpart(formula = formulation, data = ames, method = "anova")
+rpart.plot(fit.cart)
+
+#try pruning
+
+#use cv 
+printcp(fit.cart)
+best_cp <- fit.cart$cptable[which.min(fit.cart$cptable[,"xerror"]), "CP"]
+best_cp
+
+#Prune tree
+pruned <- prune(fit.cart, cp = best_cp)
+rpart.plot(pruned)
+
+#Lets view without neighborhood for now
+top2 <- c("GrLivArea", "TotalBsmtSF", "GarageArea", "OverallQual", "YearBuilt", "LotArea", "HouseStyle", "OverallQual", "KitchenQual")
+formulation2 <- reformulate(termlabels = top2, response = "SalePrice")
+fit2 <- rpart(formula = formulation2, data = ames, method = "anova")
+rpart.plot(fit2)
+
+#Prune tree2
+best_cp2 <- fit2$cptable[which.min(fit2$cptable[,"xerror"]), "CP"]
+pruned2 <- prune(fit2, cp = best_cp2)
+rpart.plot(pruned2)
+
+#Now do full model: fit all covariates and make the tree
+
+train_noPrice <- ames %>%
+  dplyr::select(-LogSalePrice)
+
+##
+
+fit.full <- rpart(
+  SalePrice ~., 
+  data = train_noPrice, 
+  method = "anova",
+  control = rpart.control(cp = 0.0001)
+)
+rpart.plot(fit.full)
+
+best_cpfull <- fit.full$cptable[which.min(fit.full$cptable[,"xerror"]), "CP"]
+prunedfull <- prune(fit.full, cp = best_cpfull)
+rpart.plot(prunedfull)
+
+# evaluate performance
+pred_test <- predict(prunedfull, newdata = test_ames)
+
+test_rmse <- sqrt(mean((test_ames$SalePrice - pred_test)^2))
+test_rmse
+```
+Based on this result, when using the full tree with all covariates, our prediction is off by about $35,000. Somewhat reasonable result.
+
+```{r}
+# lets plot actual vs predicted sales price from the tree.
+
+# create data frame that contain actual, predicted sales price
+# actual comes from test set
+# predicted comes from regression tree prediction `pred_test`
+plot_data <- data.frame(
+  Index= 1:nrow(test_ames), # horizontal axis will be the rows
+  Actual = test_ames$SalePrice,
+  Predicted = pred_test
+)
+
+#formatting for ggplot
+plot_df_format <- plot_data |> 
+  pivot_longer(cols = c("Actual", "Predicted"), 
+               names_to = "Type", 
+               values_to = "SalePrice")
+
+# now plot 
+ggplot(plot_df_format, aes(x = Index, y = SalePrice, color = Type)) +
+  geom_line(size = 1) +
+  labs(
+    title = "Actual vs Predicted Sale Price",
+    x = "Observation",
+    y = "Sale Price ($)"
+  ) +
+  scale_color_manual(values = c("Actual" = "blue", "Predicted" = "red")) +
+  scale_y_continuous(labels = comma) +
+  theme_minimal()
+
+#log SalePrice
+ggplot(plot_df_format, aes(x = Index, y = log(SalePrice), color = Type)) +
+  geom_line(size = 1) +
+  labs(
+    title = "Actual vs Predicted Sale Price",
+    x = "Observation",
+    y = "Sale Price ($)"
+  ) +
+  scale_color_manual(values = c("Actual" = "blue", "Predicted" = "red")) +
+  theme_minimal()
+```
+Save for a couple of predictions being off, like 
