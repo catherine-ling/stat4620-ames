@@ -14,6 +14,8 @@ library(tidyverse)
 library(GGally)
 library(corrplot)
 library(glmnet)
+# install.packages("pls") # Run if not already installed, otherwise leave this commented out
+library(pls)
 
 ames <- read_csv("train.csv", show_col_types = FALSE)
 
@@ -199,7 +201,7 @@ cor_top <- numeric_vars %>%
   cor(use = "pairwise.complete.obs")
 
 # heatmap
-corrplot(cor_top, method = "color", type = "upper",
+corrplot::corrplot(cor_top, method = "color", type = "upper",
          tl.col = "black", tl.srt = 45)
 
 # pairs plot
@@ -779,4 +781,130 @@ ggplot(results_df_ridge, aes(x = actual, y = predicted)) +
 ## Conclusion
 
 The Ridge model was trained on the training dataset and evaluated using a separate test dataset. Model performance on the test set was assessed using RMSE, MAE, and $R^2$. The model achieved an RMSE of \$42,352 and an MAE of \$28,826, indicating that predictions are typically within about \$29,000 of the true sale price, with some larger errors occurring. The test-set $R^2$ value of 0.72 shows that the model explains approximately 72% of the variability in housing prices on unseen data. Overall, these results indicate that the LASSO model generalizes well and provides strong predictive accuracy.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Model Analysis – PLS
+
+## Motivation for Using Partial Least Squares
+
+PLS could potentially handle the dataset well because it handles high correlation between variables (multicollinearity) well. We recognize that it also does a good job with data that has n > p (this is not the case with Ames data but still important to note). It also can shrink coefficients to zero, in turn performing variable selection. This is nice because with 79 predictors, there is a high chance of overfitting to the training set if not careful. 
+
+Unlike the previous, Partial Least Squares:
+
+- reduces coefficient variance even further through more shrinkage
+
+- can remove (technically) predictors by shrinking the non-important predictors weights to zero
+
+We know that this will *probably* not be the best when it comes to accuracy, but it can reaffirm us in what predictors are most important by looking at the largest and smallest weights given to each variable.
+
+
+**The PLS Model**
+
+Redundant yes but rebuilding to be sure on a fresh slate
+```{r}
+X <- model.matrix(
+  log_price ~ . - SalePrice,  # all predictors except SalePrice (we use log_price)
+  data = ames_mod
+)[, -1]                        # drop intercept column; glmnet adds its own
+
+y <- ames_mod$log_price
+x_sd <- apply(X, 2, sd)
+X_clean <- X[, x_sd > 0]
+
+max_comp <- min(20, ncol(X_clean), nrow(X_clean) - 1)
+```
+
+### Fitting initial model and visualizing outputs
+``` {r}
+fit.pls <- mvr(
+  y ~ X,
+  ncomp = max_comp,          
+  scale = TRUE,
+  validation = "none",
+  segments = 10,
+  segment.type = "consecutive"
+)
+
+summary(fit.pls)
+validationplot(fit.pls, val.type="RMSEP")
+```
+It looks like 5-6 PLS components are suitable for fitting the Ames dataset. The Root Mean Squared Error of Prediction (sqrt(MSEP)) turns into overfitting after that and since house prices can be highly variable. 6 components is not that much and then we can explain > 92% of sale price, so we will select 6 components.
+
+### Tuning
+```{r}
+# 6 components
+final.pls <- mvr(
+  y ~ X,
+  ncomp = max_comp,          
+  scale = TRUE,
+  validation = "none",
+  segments = 10,
+  segment.type = "consecutive"
+)
+
+# Predict on TEST data
+pls.pred <- predict(final.pls, newdata = X_test, ncomp = 6)
+
+# Convert back to normal
+pls.pred <- exp(pls.pred)
+
+# Calculate test error
+test_mse <- mean((as.vector(pls.pred) - y_test)^2)
+test_rmse <- sqrt(test_mse)
+
+print(paste("Test RMSE:", round(test_rmse, 2)))
+print(paste("Test MSE:", round(test_mse, 2)))
+print(paste("Error as %: ", round(test_rmse*100/180921, 2)))
+
+
+# compute r-squared
+sst <- sum((y_test - mean(y_test))^2)
+sse_pls <- sum((y_test - saleprice_pred_ridge)^2)
+r_squared_pls <- round(1 - sse_pls/sst, 2)
+print(paste("R^2: ", r_squared_pls))
+```
+```{r}
+# Get loading weights
+loadings <- loading.weights(final.pls)
+
+# For the first component (usually most important)
+comp1_loadings <- loadings[, 1]
+comp1_sorted <- sort(abs(comp1_loadings), decreasing = TRUE)
+print(head(comp1_sorted, 15))
+
+# Visualize
+barplot(head(comp1_sorted, 15), las=2, 
+        main="Top Variables - Component 1 Loading Weights",
+        cex.names=0.7, col="darkgreen")
+```
+
+
+
+## Conclusion
+As expected, it was not the best in accuracy metrics. But nonetheless it is helpful and reaffirms our beliefs of the most important predictors (OverallQual, GrLivArea, GarageCars, etc.). The testing RMSE was 42829 and had an R^2 of 0.72. These values were pretty close to the Ridge Regression model, which makes sense because they both excel in the same kind of qualities. Because it is so similar to the previous model, a different visualization was chosen to capture the weights of coefficients instead of the predictions. Finally, using the mean SalePrice and our testing RMSE, we can calculate the average percent we were off by in predictions: 23.7%. Overall, these results indicate that the PLS model indeed fit the data well, but not the best possible (in comparison).
+
+
+
+
+
+
+
 
