@@ -1068,10 +1068,9 @@ Catherine Ling:
   - EDA slides  
   - LASSO model
   - LASSO slide
-  - LASSO report
   - Ridge Regression model
   - Ridge Regression slide
-  - Ridge Regression report
+  - LASSO / Ridge report
   - Report conclusion
 
 Noah Ekness: 
