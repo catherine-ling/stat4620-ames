@@ -2,22 +2,28 @@
 title: "STAT4620 Project"
 author: "Catherine Ling.273"
 date: "2025-12-02"
-output: html_document
+output: 
+      prettydoc::html_pretty:
+        theme: tactile
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(warning = FALSE, echo = TRUE, message = FALSE)
+knitr::opts_chunk$set(warning = FALSE, echo = FALSE, message = FALSE)
 ```
 
-```{r}
+```{r, include= FALSE}
+library(prettydoc)
 library(tidyverse)
 library(GGally)
 library(corrplot)
 library(glmnet)
 # install.packages("pls") # Run if not already installed, otherwise leave this commented out
 library(pls)
+library(ISLR2)
+library(rpart)
+library(rpart.plot)
 
-ames <- read_csv("train.csv", show_col_types = FALSE)
+ames <- read_csv("train_Ames.csv", show_col_types = FALSE)
 
 glimpse(ames)
 ```
@@ -55,11 +61,11 @@ missing_summary
 
 Findings:
 
-- Variables with very high missingness include PoolQC, MiscFeature, Alley, and Fence, which is expected because most homes do not have pools, miscellaneous features, alleys, and fences
+- Variables with a large number of missing values include PoolQC, MiscFeature, Alley, and Fence, which is expected because most homes do not have pools, miscellaneous features, alleys, and fences
 
-- Basement and garage quality variables also include NAs for homes without basements or garages
+- Basement and garage quality variables also encode missing values for homes without basements or garages
 
-- LotFrontage has ~18% missingness, representing true unobserved data rather than a structural “None”
+- LotFrontage is ~18% N.A., representing true unobserved data rather than a structural “None”
 
 ```{r}
 # convert known structural NAs to "None"
@@ -127,7 +133,8 @@ for (var in key_numeric) {
 
 ## Relationships with SalePrice
 
-**Size/area variables**
+**Size/area variables**  
+
 ```{r}
 # scatterplots for numeric predictors
 size_vars <- intersect(c("GrLivArea", "TotalBsmtSF", "GarageArea", "X1stFlrSF"), names(ames))
@@ -301,7 +308,7 @@ where $\lambda \ge 0$ controls shrinkage.
 Training data log-transform: 
 
 ```{r}
-ames <- read_csv("train.csv") %>%
+ames <- read_csv("train_Ames.csv") %>%
   mutate(
     log_price = log(SalePrice)
   )
@@ -407,7 +414,7 @@ coef_summary
 
 ```{r}
 # read test data
-test <- read_csv("test_new.csv")
+test <- read_csv("test_Ames.csv")
 
 # handle missing values and character variables the same way as training
 test_clean <- test %>%
@@ -564,7 +571,7 @@ where $\lambda \ge 0$ controls shrinkage.
 Training data log-transform: 
 
 ```{r}
-ames <- read_csv("train.csv") %>%
+ames <- read_csv("train_Ames.csv") %>%
   mutate(
     log_price = log(SalePrice)
   )
@@ -671,7 +678,7 @@ coef_summary_ridge
 
 ```{r}
 # read test data
-test <- read_csv("test_new.csv")
+test <- read_csv("test_Ames.csv")
 
 # handle missing values and character variables the same way as training
 test_clean <- test %>%
@@ -896,10 +903,103 @@ barplot(head(comp1_sorted, 15), las=2,
         cex.names=0.7, col="darkgreen")
 ```
 
-
-
 ## Conclusion
 As expected, it was not the best in accuracy metrics. But nonetheless it is helpful and reaffirms our beliefs of the most important predictors (OverallQual, GrLivArea, GarageCars, etc.). The testing RMSE was 42829 and had an R^2 of 0.72. These values were pretty close to the Ridge Regression model, which makes sense because they both excel in the same kind of qualities. Because it is so similar to the previous model, a different visualization was chosen to capture the weights of coefficients instead of the predictions. Finally, using the mean SalePrice and our testing RMSE, we can calculate the average percent we were off by in predictions: 23.7%. Overall, these results indicate that the PLS model indeed fit the data well, but not the best possible (in comparison).
+
+# Model Analysis - Regression Tree
+
+## Motivation - Why Regression Tree?
+There are a few good reasons to utilize a regression tree here. First, regression trees can handle non-linear relationships interactions between predictors easily and without intervention. This is particularly helpful in this context, where effects such as square footage, neighborhood, and overall quality may influence prices differently across ranges of values.
+
+Secondly, regression trees can handle both continuous and categorical predictors, which is important given all of the different variable types in the dataset. Also, using a tree structure makes interpretation simple, with decision rules allowing us to identify which variables are most influential and how they partition the data into groups with similar sale prices. 
+```{r, include = FALSE}
+ames <- read_csv("train_Ames.csv", show_col_types = FALSE)
+test_ames <-  read_csv("C:/Users/khale/Downloads/test_Ames.csv")
+
+#fix name matching
+setdiff(names(ames), names(test_ames))
+# fix difference in names
+
+name_map <- c(
+  "X1stFlrSF"   = "1stFlrSF",
+  "X2ndFlrSF"   = "2ndFlrSF",
+  "X3SsnPorch"  = "3SsnPorch"
+)
+
+names(test_ames) <- sapply(names(test_ames), function(nm) {
+  if (nm %in% names(name_map)) name_map[[nm]] else nm
+})
+```
+
+```{r}
+set.seed(1)
+library(ISLR2)
+library(rpart)
+library(rpart.plot)
+
+ames <- ames %>%
+  mutate(logSalePrice = log(SalePrice))
+
+test_ames <- test_ames %>%
+  mutate(logSalePrice = log(SalePrice))
+
+train_noPrice <- ames %>%
+  dplyr::select(-SalePrice)
+
+test_noPrice <- test_ames %>%
+  dplyr::select(-SalePrice)
+
+fit.full <- rpart(
+  logSalePrice ~., 
+  data = train_noPrice, 
+  method = "anova",
+  control = rpart.control(cp = 0.0001)
+)
+rpart.plot(fit.full)
+
+best_cpfull <- fit.full$cptable[which.min(fit.full$cptable[,"xerror"]), "CP"]
+prunedfull <- prune(fit.full, cp = best_cpfull)
+rpart.plot(prunedfull)
+
+# evaluate performance
+pred_test <- predict(prunedfull, newdata = test_noPrice)
+
+# remove log to interpret rmse as dollars
+e_pred_test <- exp(pred_test)
+
+#Now compare normal saleprice to exp(log_dollars)
+test_rmse <- sqrt(mean((test_ames$SalePrice - e_pred_test)^2))
+
+# Mean Absolute Error, R-Squared
+#MAE
+mae <- mean(abs(test_ames$SalePrice - e_pred_test))
+
+
+#R-Squared
+sst <- sum((test_ames$SalePrice - mean(test_ames$SalePrice))^2)
+sse <- sum((test_ames$SalePrice - e_pred_test)^2)
+r_squared <- 1 - sse/sst
+
+
+imp <- fit.full$variable.importance
+sort(imp, decreasing=TRUE)
+
+cat("Complexity Parameter: ", best_cpfull)  
+
+cat("\nTest RMSE: ", test_rmse)
+
+cat("\nMAE: ", mae)
+
+cat("\nR-Squared: ", r_squared)
+
+cat("\n")
+head(imp, 5)
+```
+The regression tree was fit using all available covariates and pruned using cross-validated pruning to select an optimal tree size. Cross-validation favored a relatively small complexity parameter (0.0002), meaning there were several splits that made significant reductions in error.
+
+On the test dataset, the pruned regression tree achieved a root mean squared error of approximately 35,205, mean absolute error of 22,762, and an $R^2$ of 0.808, indicating reasonable predictive performance compared to the other models. We can interpret the value of RMSE and MAE in units of dollars, making interpretation fairly simple. 
+
+The key predictors highlighted by the tree as most influential to `SalePrice` were `OverallQual`, `Neighborhood`, `YearBuilt`, `ExterQual`, and `Foundation`, reinforcing findings from the exploratory data analysis. While the regression tree does not achieve the lowest possible prediction error among all models considered, it provides good interpretability and is a good candidate for summarizing the effect of multiple covariates of different types.
 
 
 
