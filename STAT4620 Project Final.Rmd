@@ -33,7 +33,7 @@ This report is an in-depth analysis of the well documented Ames Housing data. In
 
 Then, our group implemented $\text{four}$ different regression models and tested their efficacy: $\textbf{LASSO}$ and $\textbf{Ridge Regression}$ for ease of interpretation, $\textbf{Partial Least Squares}$ (PLS) to directly reduce the number of predictors, and a $\textbf{Regression Tree}$ for dealing with multi-collinearity among the predictors.  
 
-Following that we used multiple measures of model performance to compare the effectiveness of each model to one another. We wanted to find out which model fits the Ames data the best, as well as what predictors said model found explain the most variability in the response, `SalePrice`. Finally, a short sensitivity analysis was done to assess how our model changes with different parameter values for the purpose of optimizing model performance.
+Following that we used multiple measures of model performance to compare the effectiveness of each model to one another. We wanted to find out which model fits the Ames data the best, as well as what predictors said model found explain the most variability in the response, `SalePrice`. 
 
 # Part I: Exploratory Data Analysis
 
