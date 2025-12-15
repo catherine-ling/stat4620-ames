@@ -1,0 +1,1099 @@
+---
+title: "STAT4620 Project Report - Ames"
+author: " Group 4: Catherine Ling.273, Noah Ekness.1, Khaled Elhassan.11, Troy Crockett.179"
+date: "2025-12-14"
+output: 
+      prettydoc::html_pretty:
+        theme: tactile
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, echo = FALSE, message = FALSE)
+```
+
+```{r, include= FALSE}
+library(prettydoc)
+library(tidyverse)
+library(GGally)
+library(corrplot)
+library(glmnet)
+# install.packages("pls") # Run if not already installed, otherwise leave this commented out
+library(pls)
+library(ISLR2)
+library(rpart)
+library(rpart.plot)
+
+ames <- read_csv("train.csv", show_col_types = FALSE)
+
+glimpse(ames)
+```
+
+# Overview
+This report is an in-depth analysis of the well documented Ames Housing data. Initially, we conducted an exploratory data analysis (EDA) to become familiar with the specifics of the data, as well as to take note of any cleaning that may be needed for the following statistical analysis to work properly.  
+
+Then, our group implemented $\text{four}$ different regression models and tested their efficacy: $\textbf{LASSO}$ and $\textbf{Ridge Regression}$ for ease of interpretation, $\textbf{Partial Least Squares}$ (PLS) to directly reduce the number of predictors, and a $\textbf{Regression Tree}$ for dealing with multi-collinearity among the predictors.  
+
+Following that we used multiple measures of model performance to compare the effectiveness of each model to one another. We wanted to find out which model fits the Ames data the best, as well as what predictors said model found explain the most variability in the response, `SalePrice`. Finally, a short sensitivity analysis was done to assess how our model changes with different parameter values for the purpose of optimizing model performance.
+
+# Part I: Exploratory Data Analysis
+
+## Dataset Introduction
+
+The Ames Housing dataset contains residential home sales in Ames, Iowa from 2006–2010 and includes 79 predictors describing lot characteristics, house quality, building type, square footage, basement and garage features, and neighborhood information. The response variable for modeling is SalePrice, the sale price of each home in USD.
+
+The dataset contains a mixture of numeric, ordinal, and nominal variables. Its initial state: 
+
+```{r}
+# summary statistics
+summary(ames)
+
+# split by variable type
+numeric_vars <- ames %>% select(where(is.numeric))
+categorical_vars <- ames %>% select(where(~ !is.numeric(.)))
+
+```
+## Missing Data
+
+Several variables contain missing values, but many of these are structural (“feature not present”) rather than incomplete. For example, if a house has no basement, basement quality fields are NA.
+
+
+```{r}
+missing_summary <- ames %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "missing") %>%
+  arrange(desc(missing))
+
+missing_summary
+```
+
+Findings:
+
+- Variables with a large number of missing values include PoolQC, MiscFeature, Alley, and Fence, which is expected because most homes do not have pools, miscellaneous features, alleys, and fences
+
+- Basement and garage quality variables also encode missing values for homes without basements or garages
+
+- LotFrontage is ~18% N.A., representing true unobserved data rather than a structural “None”
+
+```{r}
+# convert known structural NAs to "None"
+ames <- ames %>%
+  mutate(
+    Alley        = replace_na(Alley, "None"),
+    PoolQC       = replace_na(PoolQC, "None"),
+    Fence        = replace_na(Fence, "None"),
+    MiscFeature  = replace_na(MiscFeature, "None"),
+    FireplaceQu  = replace_na(FireplaceQu, "None"),
+    GarageType   = replace_na(GarageType, "None"),
+    GarageFinish = replace_na(GarageFinish, "None"),
+    GarageQual   = replace_na(GarageQual, "None"),
+    GarageCond   = replace_na(GarageCond, "None"),
+    BsmtQual     = replace_na(BsmtQual, "None"),
+    BsmtCond     = replace_na(BsmtCond, "None"),
+    BsmtExposure = replace_na(BsmtExposure, "None"),
+    BsmtFinType1 = replace_na(BsmtFinType1, "None"),
+    BsmtFinType2 = replace_na(BsmtFinType2, "None")
+  )
+```
+
+## Distribution of Variables 
+
+**SalePrice**
+
+One notable issue is that SalePrice is heavily right-skewed, which violates the normality assumption of linear regression. 
+
+```{r}
+# histograms
+ggplot(ames, aes(x = SalePrice)) +
+  geom_histogram(bins = 40, fill = "blue") +
+  labs(title = "SalePrice")
+```
+
+A log-transformation produces a much more symmetric distribution:
+
+```{r}
+# log transformation to normalize
+ames <- ames %>% mutate(LogSalePrice = log(SalePrice))
+
+ggplot(ames, aes(x = LogSalePrice)) +
+  geom_histogram(bins = 40, fill = "red") +
+  labs(title = "log(SalePrice)")
+```
+
+Skewness suggests that data transformations (e.g., log) or models that don't require linearity would be best suited for this dataset. 
+
+**Numeric Variables**
+
+```{r}
+key_numeric <- c("GrLivArea", "TotalBsmtSF", "GarageArea", "LotArea",
+                 "X1stFlrSF", "X2ndFlrSF", "OverallQual")
+
+key_numeric <- intersect(key_numeric, names(ames))
+
+for (var in key_numeric) {
+  print(
+    ggplot(ames, aes_string(x = var)) +
+      geom_histogram(bins = 40, fill = "gray") +
+      labs(title = paste("Distribution of", var))
+  )
+}
+```
+
+## Relationships with SalePrice
+
+**Size/area variables**  
+
+```{r}
+# scatterplots for numeric predictors
+size_vars <- intersect(c("GrLivArea", "TotalBsmtSF", "GarageArea", "X1stFlrSF"), names(ames))
+
+for (var in size_vars) {
+  print(
+    ggplot(ames, aes_string(x = var, y = "SalePrice")) +
+      geom_point(alpha = 0.5) +
+      geom_smooth(method = "lm", se = FALSE) +
+      labs(title = paste("SalePrice vs", var))
+  )
+}
+```
+
+- GrLivArea and TotalBsmtSF show strong positive linear trends.
+
+- Outliers exist for very large homes (>4000 sq ft).
+
+
+**Quality**
+
+```{r}
+# overallQual boxplot
+if ("OverallQual" %in% names(ames)) {
+  ggplot(ames, aes(x = factor(OverallQual), y = SalePrice)) +
+    geom_boxplot() +
+    labs(title = "SalePrice by OverallQual")
+}
+```
+
+Higher OverallQual correlates strongly with higher prices, showing a step-like increase.
+
+
+**Neighborhood**
+
+```{r}
+# neighborhood boxplot
+if ("Neighborhood" %in% names(ames)) {
+  ggplot(ames, aes(x = reorder(Neighborhood, SalePrice, FUN = median),
+                   y = SalePrice)) +
+    geom_boxplot() +
+    coord_flip() +
+    labs(title = "SalePrice by Neighborhood")
+}
+```
+
+Neighborhoods differ substantially in median home value, implying they are relatively important predictors.
+
+## Correlation & Collinearity
+
+```{r}
+cor_matrix <- numeric_vars %>% cor(use = "pairwise.complete.obs")
+
+# correlation with SalePrice
+cor_with_price <- sort(cor_matrix[,"SalePrice"], decreasing = TRUE)
+cor_with_price
+
+# top correlated predictors
+top_corr <- names(head(cor_with_price, 10))
+```
+
+Strongest correlations: 
+
+  - OverallQual (0.79)
+  - GrLivArea (0.71)
+  - GarageCars, GarageArea, TotalBsmtSF, 1stFlrSF (~0.60 - 0.64)
+
+
+Multicollinearity among top predictors: 
+
+```{r}
+cor_top <- numeric_vars %>%
+  select(all_of(top_corr)) %>%
+  cor(use = "pairwise.complete.obs")
+
+# heatmap
+corrplot::corrplot(cor_top, method = "color", type = "upper",
+         tl.col = "black", tl.srt = 45)
+
+# pairs plot
+GGally::ggpairs(ames, columns = top_corr)
+
+```
+
+- GarageCars and GarageArea are highly collinear
+
+- 1stFlrSF and TotalBsmtSF are strongly correlated
+
+- Quality ratings like OverallQual correlate with other quality-related scores
+
+Collinearity suggests models with regularization (Ridge/LASSO) or selective variable inclusion would work best. 
+
+## Other Problems
+
+**Zero-inflation** 
+
+Several variables contain mostly zeros: 
+
+```{r}
+zero_vars <- intersect(c("PoolArea", "MiscVal", "ScreenPorch",
+                         "EnclosedPorch", "LowQualFinSF"), names(ames))
+
+for (var in zero_vars) {
+  zero_prop <- mean(ames[[var]] == 0)
+  cat(var, "- proportion zeros:", round(zero_prop, 3), "\n")
+  
+  print(
+    ggplot(ames, aes_string(x = var)) +
+      geom_histogram(bins = 40, fill = "gray50") +
+      labs(title = paste("Distribution of", var))
+  )
+}
+```
+
+**Outliers**
+
+```{r}
+if ("GrLivArea" %in% names(ames)) {
+  ggplot(ames, aes(x = GrLivArea, y = SalePrice)) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method = "lm", se = FALSE) +
+    labs(title = "Outlier Check: GrLivArea vs SalePrice")
+
+  # view suspected outliers
+  ames %>% filter(GrLivArea > 4000) %>%
+    select(GrLivArea, SalePrice, OverallQual, Neighborhood)
+}
+```
+
+Houses with very large living area (>4000 sq ft) appear to be outliers and may disproportionately influence linear regression.
+
+## Final Data Preparation
+
+1. Training data log-transform
+
+2. Handling missing values: 
+
+- for character predictors: replace NA with "None", then convert to factor
+- for numeric predictors (other than Id, SalePrice, log_price): median impute
+
+3. Design matrix (for LASSO, Ridge Regression, and PLS)
+
+
+# Part II: Model Analysis - LASSO Regression
+
+
+## Motivation for Using LASSO
+
+The EDA revealed:
+
+- Many predictors are highly correlated (e.g., GarageCars with GarageArea, 1stFlrSF with TotalBsmtSF).
+
+- The dataset contains many potential predictors (~79).
+
+- Some predictors may be irrelevant or redundant.
+
+- Linear relationships appear strong, especially after transforming SalePrice.
+
+
+Because of this, ordinary least squares (OLS) would be unstable and prone to overfitting due to multicollinearity and high dimensionality.
+
+LASSO regression (Least Absolute Shrinkage and Selection Operator) performs:
+
+- Regularization -> improves generalization
+
+- Variable selection -> shrinks coefficients of unimportant variables to zero
+
+- Handles multicollinearity better than OLS
+
+Thus, LASSO is an appropriate modeling strategy for this dataset.
+
+
+**The LASSO Model**
+
+Given predictors $X_1, X_2, ..., X_p$ and response $y$, LASSO solves: 
+
+$$
+\hat{\beta} = \arg\min_\beta \left( \sum^n_{i=1}(y_i-\beta_0-\sum^p_{j=1} X_{ij} \beta_j)^2 + \lambda \sum^p_{j=1} |\beta_j| \right)
+$$
+
+where $\lambda \ge 0$ controls shrinkage.
+
+
+
+```{r}
+ames <- read_csv("train.csv") %>%
+  mutate(
+    log_price = log(SalePrice)
+  )
+```
+
+
+```{r}
+
+ames_clean <- ames %>%
+  # character -> "None" where NA
+  mutate(across(where(is.character), ~ replace_na(., "None"))) %>%
+  # now convert all characters to factors
+  mutate(across(where(is.character), factor))
+
+# numeric predictors (exclude Id, SalePrice, log_price)
+num_pred <- names(ames_clean)[sapply(ames_clean, is.numeric) &
+                                !(names(ames_clean) %in% c("Id", "SalePrice", "log_price"))]
+
+ames_clean <- ames_clean %>%
+  mutate(
+    across(all_of(num_pred),
+           ~ replace_na(., median(., na.rm = TRUE)))
+  )
+
+# drop factor columns with only ONE level
+fac_cols  <- sapply(ames_clean, is.factor)
+one_level <- names(ames_clean)[fac_cols][sapply(ames_clean[fac_cols], nlevels) < 2]
+
+ames_mod <- ames_clean %>%
+  select(-all_of(one_level),
+         -Id)   # Id is just a label, not a predictor
+
+```
+
+
+```{r}
+X <- model.matrix(
+  log_price ~ . - SalePrice,  # all predictors except SalePrice (we use log_price)
+  data = ames_mod
+)[, -1]                        # drop intercept column; glmnet adds its own
+
+y <- ames_mod$log_price
+```
+
+
+## Fitting the Model
+
+```{r}
+set.seed(123)
+
+cv_lasso <- cv.glmnet(
+  X, y,
+  alpha  = 1,      # LASSO
+  nfolds = 10
+)
+
+lambda_min <- cv_lasso$lambda.min
+lambda_1se <- cv_lasso$lambda.1se
+
+cat("Minimum lamda: ", lambda_min)
+```
+
+
+
+
+Visualizing the CV curve: 
+
+```{r}
+plot(cv_lasso)
+```
+
+
+Fitting the final model - results:
+
+```{r}
+lasso_model <- glmnet(X, y, alpha = 1, lambda = lambda_min)
+```
+
+
+```{r}
+coef_summary <- coef(lasso_model) %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column("Variable") %>%
+  rename(Coefficient = s0) %>%
+  filter(Coefficient != 0) %>%
+  arrange(desc(abs(Coefficient)))
+
+coef_summary
+```
+
+
+
+## Testing
+
+```{r}
+# read test data
+test <- read_csv("test_new.csv")
+
+# handle missing values and character variables the same way as training
+test_clean <- test %>%
+  # replace na in character columns with "none"
+  mutate(across(where(is.character), ~ replace_na(., "None"))) %>%
+  # convert characters to factors
+  mutate(across(where(is.character), factor))
+
+```
+
+```{r}
+# compute training medians for numeric predictors
+train_medians <- sapply(ames_clean[num_pred], median, na.rm = TRUE)
+
+# apply median imputation to numeric predictors in test using training medians
+for (v in num_pred) {
+  if (v %in% names(test_clean)) {
+    test_clean[[v]] <- replace_na(test_clean[[v]], train_medians[[v]])
+  }
+}
+
+# drop the same single-level factor columns and id as in training
+test_mod <- test_clean %>%
+  select(-all_of(one_level),
+         -Id)
+```
+
+```{r}
+# build model matrix for test data (no response in formula)
+X_test <- model.matrix(
+  ~ . - SalePrice,   # same predictor structure as training
+  data = test_mod
+)[, -1]              # drop intercept column
+
+# align test design matrix columns with training design matrix
+train_cols <- colnames(X)
+test_cols  <- colnames(X_test)
+
+# add any columns that are in training but missing in test (fill with zeros)
+missing_cols <- setdiff(train_cols, test_cols)
+if (length(missing_cols) > 0) {
+  X_test <- cbind(
+    X_test,
+    matrix(0, nrow(X_test), length(missing_cols),
+           dimnames = list(NULL, missing_cols))
+  )
+}
+
+# drop any extra columns that appear only in test
+extra_cols <- setdiff(colnames(X_test), train_cols)
+if (length(extra_cols) > 0) {
+  X_test <- X_test[, setdiff(colnames(X_test), extra_cols)]
+}
+
+# reorder columns to match training matrix exactly
+X_test <- X_test[, train_cols]
+
+```
+
+```{r}
+# predict log-price on the test set
+log_pred_test <- predict(lasso_model, newx = X_test, s = lambda_min)
+
+# convert back from log scale to saleprice
+saleprice_pred <- exp(log_pred_test)
+
+```
+
+```{r}
+# extract true saleprice from test set
+y_test <- test$SalePrice
+
+# compute rmse (root mean squared error)
+rmse <- sqrt(mean((y_test - saleprice_pred)^2))
+cat("RMSE: ", rmse)
+
+# compute mae
+mae <- mean(abs(y_test - saleprice_pred))
+cat("MAE: ", mae)
+
+# compute r-squared
+sst <- sum((y_test - mean(y_test))^2)
+sse <- sum((y_test - saleprice_pred)^2)
+r_squared <- 1 - sse/sst
+cat("R^2: ", r_squared)
+
+```
+
+```{r}
+# create a results dataframe for visualization
+results_df <- tibble(
+  actual = test$SalePrice,
+  predicted = as.numeric(saleprice_pred),
+  residual = actual - predicted
+)
+
+# predicted vs actual plot
+ggplot(results_df, aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(
+    title = "Predicted vs Actual Sale Price (LASSO)",
+    x = "Actual Sale Price",
+    y = "Predicted Sale Price"
+  )
+```
+
+## Conclusion
+
+The LASSO model was trained on the training dataset and evaluated using a separate test dataset. Model performance on the test set was assessed using RMSE, MAE, and $R^2$. The model achieved an RMSE of \$31,110 and an MAE of \$15,727, indicating that predictions are typically within about \$16,000 of the true sale price, with some larger errors occurring. The test-set $R^2$ value of 0.85 shows that the model explains approximately 85% of the variability in housing prices on unseen data. Overall, these results indicate that the LASSO model generalizes well and provides strong predictive accuracy.
+
+
+------------------------------------
+
+# Model Analysis – Ridge Regression
+
+## Motivation for Using Ridge
+
+The EDA revealed:
+
+- Many predictors are highly correlated (e.g., GarageCars with GarageArea, 1stFlrSF with TotalBsmtSF).
+
+- The dataset contains many potential predictors (~79).
+
+- Linear relationships appear strong, especially after transforming SalePrice.
+
+- Multicollinearity is present among several structural features.
+
+
+Unlike LASSO, Ridge regression:
+
+- reduces coefficient variance through shrinkage
+
+- stabilizes estimates in the presence of multicollinearity
+
+- retains all predictors (no variable elimination)
+
+Thus, Ridge regression is well-suited for this dataset when predictive accuracy is prioritized over model sparsity.
+
+
+**The Ridge Model**
+
+Given predictors $X_1, X_2, ..., X_p$ and response $y$, LASSO solves: 
+
+$$
+\hat{\beta} = \arg\min_\beta \left( \sum^n_{i=1}(y_i-\beta_0-\sum^p_{j=1} X_{ij} \beta_j)^2 + \lambda \sum^p_{j=1} \beta_j^2 \right)
+$$
+
+where $\lambda \ge 0$ controls shrinkage.
+
+
+
+```{r}
+ames <- read_csv("train.csv") %>%
+  mutate(
+    log_price = log(SalePrice)
+  )
+```
+
+
+
+```{r}
+
+ames_clean <- ames %>%
+  # character -> "None" where NA
+  mutate(across(where(is.character), ~ replace_na(., "None"))) %>%
+  # now convert all characters to factors
+  mutate(across(where(is.character), factor))
+
+# numeric predictors (exclude Id, SalePrice, log_price)
+num_pred <- names(ames_clean)[sapply(ames_clean, is.numeric) &
+                                !(names(ames_clean) %in% c("Id", "SalePrice", "log_price"))]
+
+ames_clean <- ames_clean %>%
+  mutate(
+    across(all_of(num_pred),
+           ~ replace_na(., median(., na.rm = TRUE)))
+  )
+
+# drop factor columns with only ONE level
+fac_cols  <- sapply(ames_clean, is.factor)
+one_level <- names(ames_clean)[fac_cols][sapply(ames_clean[fac_cols], nlevels) < 2]
+
+ames_mod <- ames_clean %>%
+  select(-all_of(one_level),
+         -Id)   # Id is just a label, not a predictor
+
+```
+
+
+```{r}
+X <- model.matrix(
+  log_price ~ . - SalePrice,  # all predictors except SalePrice (we use log_price)
+  data = ames_mod
+)[, -1]                        # drop intercept column; glmnet adds its own
+
+y <- ames_mod$log_price
+```
+
+
+## Fitting the Ridge Model 
+
+```{r}
+set.seed(123)
+
+cv_ridge <- cv.glmnet(
+  X, y,
+  alpha  = 0,      # ridge
+  nfolds = 10
+)
+
+lambda_min_ridge <- cv_ridge$lambda.min
+lambda_1se_ridge <- cv_ridge$lambda.1se
+
+cat("Minimum lambda: ", lambda_min_ridge)
+```
+
+
+Visualizing the CV curve: 
+
+```{r}
+plot(cv_ridge)
+```
+
+
+Fitting the final model - results: 
+
+```{r}
+ridge_model <- glmnet(
+  X, y,
+  alpha  = 0,
+  lambda = lambda_min_ridge
+)
+```
+
+
+```{r}
+coef_summary_ridge <- coef(ridge_model) %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column("Variable") %>%
+  rename(Coefficient = s0) %>%
+  arrange(desc(abs(Coefficient)))
+
+coef_summary_ridge
+
+```
+
+## Testing
+
+```{r}
+# read test data
+test <- read_csv("test_new.csv")
+
+# handle missing values and character variables the same way as training
+test_clean <- test %>%
+  # replace na in character columns with "none"
+  mutate(across(where(is.character), ~ replace_na(., "None"))) %>%
+  # convert characters to factors
+  mutate(across(where(is.character), factor))
+
+```
+
+```{r}
+# compute training medians for numeric predictors
+train_medians <- sapply(ames_clean[num_pred], median, na.rm = TRUE)
+
+# apply median imputation to numeric predictors in test using training medians
+for (v in num_pred) {
+  if (v %in% names(test_clean)) {
+    test_clean[[v]] <- replace_na(test_clean[[v]], train_medians[[v]])
+  }
+}
+
+# drop the same single-level factor columns and id as in training
+test_mod <- test_clean %>%
+  select(-all_of(one_level),
+         -Id)
+```
+
+```{r}
+# build model matrix for test data (no response in formula)
+X_test <- model.matrix(
+  ~ . - SalePrice,   # same predictor structure as training
+  data = test_mod
+)[, -1]              # drop intercept column
+
+# align test design matrix columns with training design matrix
+train_cols <- colnames(X)
+test_cols  <- colnames(X_test)
+
+# add any columns that are in training but missing in test (fill with zeros)
+missing_cols <- setdiff(train_cols, test_cols)
+if (length(missing_cols) > 0) {
+  X_test <- cbind(
+    X_test,
+    matrix(0, nrow(X_test), length(missing_cols),
+           dimnames = list(NULL, missing_cols))
+  )
+}
+
+# drop any extra columns that appear only in test
+extra_cols <- setdiff(colnames(X_test), train_cols)
+if (length(extra_cols) > 0) {
+  X_test <- X_test[, setdiff(colnames(X_test), extra_cols)]
+}
+
+# reorder columns to match training matrix exactly
+X_test <- X_test[, train_cols]
+
+```
+
+```{r}
+# predict log-price on the test set
+log_pred_test_ridge <- predict(
+  ridge_model,
+  newx = X_test,
+  s = lambda_min_ridge
+)
+
+# convert back from log scale to saleprice
+saleprice_pred_ridge <- exp(log_pred_test_ridge)
+```
+
+```{r}
+# compute rmse
+rmse_ridge <- sqrt(mean((y_test - saleprice_pred_ridge)^2))
+cat("RMSE: ", rmse_ridge)
+
+# compute mae
+mae_ridge <- mean(abs(y_test - saleprice_pred_ridge))
+cat("MAE: ", mae_ridge)
+
+# compute r-squared
+sst <- sum((y_test - mean(y_test))^2)
+sse_ridge <- sum((y_test - saleprice_pred_ridge)^2)
+r_squared_ridge <- 1 - sse_ridge/sst
+cat("R^2: ", r_squared_ridge)
+```
+
+```{r}
+# create a results dataframe for ridge visualization
+results_df_ridge <- tibble(
+  actual = test$SalePrice,
+  predicted = as.numeric(saleprice_pred_ridge),
+  residual = actual - predicted
+)
+
+# predicted vs actual plot
+ggplot(results_df_ridge, aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(
+    title = "Predicted vs Actual Sale Price (Ridge)",
+    x = "Actual Sale Price",
+    y = "Predicted Sale Price"
+  )
+```
+
+## Conclusion
+
+The Ridge model was trained on the training dataset and evaluated using a separate test dataset. Model performance on the test set was assessed using RMSE, MAE, and $R^2$. The model achieved an RMSE of \$42,352 and an MAE of \$28,826, indicating that predictions are typically within about \$29,000 of the true sale price, with some larger errors occurring. The test-set $R^2$ value of 0.72 shows that the model explains approximately 72% of the variability in housing prices on unseen data. Overall, these results indicate that the LASSO model generalizes well and provides strong predictive accuracy.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Model Analysis – PLS
+
+## Motivation for Using Partial Least Squares
+
+PLS could potentially handle the dataset well because it handles high correlation between variables (multicollinearity) well. We recognize that it also does a good job with data with $n > p$ (this is not the case with Ames data but still important to note). It also can shrink coefficients to zero, in turn performing variable selection. This is nice because with 79 predictors, there is a high chance of overfitting to the training set if not careful. 
+
+Unlike the previous, Partial Least Squares:
+
+- reduces coefficient variance even further through more shrinkage
+
+- can remove (technically) predictors by shrinking the non-important predictors weights to zero
+
+We know that this will *probably* not be the best when it comes to accuracy, but it can reaffirm what predictors are most important by looking at the largest and smallest weights given to each variable.
+
+
+**The PLS Model**
+
+PLS regression models the response as a function of latent components that are linear combinations of the original predictors. These components are chosen to maximize covariance between the predictors and the response: 
+
+$$
+y = \beta_0 + \sum^K_{k=1} t_k \beta_k + \epsilon
+$$
+where $t_k$ are latent components derived from the predictor matrix $X$, and $K$ is the number of components selected via cross-validation.
+
+
+```{r}
+X <- model.matrix(
+  log_price ~ . - SalePrice,  # all predictors except SalePrice (we use log_price)
+  data = ames_mod
+)[, -1]                        # drop intercept column; glmnet adds its own
+
+y <- ames_mod$log_price
+x_sd <- apply(X, 2, sd)
+X_clean <- X[, x_sd > 0]
+
+max_comp <- min(20, ncol(X_clean), nrow(X_clean) - 1)
+```
+
+## Fitting the PLS Model
+
+``` {r}
+fit.pls <- mvr(
+  y ~ X,
+  ncomp = max_comp,          
+  scale = TRUE,
+  validation = "none",
+  segments = 10,
+  segment.type = "consecutive"
+)
+
+summary(fit.pls)
+validationplot(fit.pls, val.type="RMSEP")
+```
+
+It looks like 5-6 PLS components are suitable for fitting the Ames dataset. The Root Mean Squared Error of Prediction (sqrt(MSEP)) turns into overfitting after that and since house prices can be highly variable. 6 components is not that many and we can explain > 92% of sale price, so we will select 6 components.
+
+```{r}
+# 6 components
+final.pls <- mvr(
+  y ~ X,
+  ncomp = max_comp,          
+  scale = TRUE,
+  validation = "none",
+  segments = 10,
+  segment.type = "consecutive"
+)
+
+# Predict on TEST data
+pls.pred <- predict(final.pls, newdata = X_test, ncomp = 6)
+
+# Convert back to normal
+pls.pred <- exp(pls.pred)
+
+# Calculate test error
+test_mse <- mean((as.vector(pls.pred) - y_test)^2)
+test_rmse <- sqrt(test_mse)
+
+print(paste("Test RMSE:", round(test_rmse, 2)))
+print(paste("Test MSE:", round(test_mse, 2)))
+print(paste("Error as %: ", round(test_rmse*100/180921, 2)))
+
+
+# compute r-squared
+sst <- sum((y_test - mean(y_test))^2)
+sse_pls <- sum((y_test - saleprice_pred_ridge)^2)
+r_squared_pls <- round(1 - sse_pls/sst, 2)
+print(paste("R^2: ", r_squared_pls))
+```
+```{r}
+# Get loading weights
+loadings <- loading.weights(final.pls)
+
+# For the first component (usually most important)
+comp1_loadings <- loadings[, 1]
+comp1_sorted <- sort(abs(comp1_loadings), decreasing = TRUE)
+print(head(comp1_sorted, 15))
+
+# Visualize
+barplot(head(comp1_sorted, 15), las=2, 
+        main="Top Variables - Component 1 Loading Weights",
+        cex.names=0.7, col="darkgreen")
+```
+
+## Conclusion
+
+As expected, it was not the best in accuracy metrics. But nonetheless it is helpful and reaffirms our beliefs of the most important predictors (OverallQual, GrLivArea, GarageCars, etc.). The testing RMSE was 42829 and had an R^2 of 0.72. These values were pretty close to the Ridge Regression model, which makes sense because they both excel in the same kind of qualities. Because it is so similar to the previous model, a different visualization was chosen to capture the weights of coefficients instead of the predictions. Finally, using the mean SalePrice and our testing RMSE, we can calculate the average percent we were off by in predictions: 23.7%. Overall, these results indicate that the PLS model indeed fit the data well, but not the best possible (in comparison).
+
+# Model Analysis - CART
+
+## Motivation - Why Regression Tree?
+
+There are a few good reasons to utilize a regression tree here. First, regression trees can handle non-linear relationships interactions between predictors easily and without intervention. This is particularly helpful in this context, where effects such as square footage, neighborhood, and overall quality may influence prices differently across ranges of values.
+
+Secondly, regression trees can handle both continuous and categorical predictors, which is important given all of the different variable types in the dataset. Also, using a tree structure makes interpretation simple, with decision rules allowing us to identify which variables are most influential and how they partition the data into groups with similar sale prices. 
+
+**The CART Model**
+
+CART regression recursively partitions the predictor space into regions and fits a constant value within each region: 
+
+$$
+\hat{y}(x) = \sum^M_{m=1} c_m I (x \in R_m)
+$$
+where $R_m$ are regions defined by splitting rules and $c_m$ are predicted values within each region.
+
+```{r, include = FALSE}
+ames <- read_csv("train.csv", show_col_types = FALSE)
+test_ames <-  read_csv("test_new.csv")
+
+#fix name matching
+setdiff(names(ames), names(test_ames))
+# fix difference in names
+
+name_map <- c(
+  "X1stFlrSF"   = "1stFlrSF",
+  "X2ndFlrSF"   = "2ndFlrSF",
+  "X3SsnPorch"  = "3SsnPorch"
+)
+
+names(test_ames) <- sapply(names(test_ames), function(nm) {
+  if (nm %in% names(name_map)) name_map[[nm]] else nm
+})
+```
+
+## Fitting the CART Model
+
+```{r}
+set.seed(1)
+library(ISLR2)
+library(rpart)
+library(rpart.plot)
+
+ames <- ames %>%
+  mutate(logSalePrice = log(SalePrice))
+
+test_ames <- test_ames %>%
+  mutate(logSalePrice = log(SalePrice))
+
+train_noPrice <- ames %>%
+  dplyr::select(-SalePrice)
+
+test_noPrice <- test_ames %>%
+  dplyr::select(-SalePrice)
+
+fit.full <- rpart(
+  logSalePrice ~., 
+  data = train_noPrice, 
+  method = "anova",
+  control = rpart.control(cp = 0.0001)
+)
+rpart.plot(fit.full)
+
+best_cpfull <- fit.full$cptable[which.min(fit.full$cptable[,"xerror"]), "CP"]
+prunedfull <- prune(fit.full, cp = best_cpfull)
+rpart.plot(prunedfull)
+
+
+imp <- fit.full$variable.importance
+sort(imp, decreasing=TRUE)
+```
+
+## Testing 
+
+```{r}
+
+# evaluate performance
+pred_test <- predict(prunedfull, newdata = test_noPrice)
+
+# remove log to interpret rmse as dollars
+e_pred_test <- exp(pred_test)
+
+results_CART <- tibble(
+  actual = test_ames$SalePrice,
+  predicted = as.numeric(pred_test),
+  residual = actual - predicted
+)
+
+#predicted vs actual plot
+ggplot(results_CART, aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.6) +
+  labs(
+    title = "Predicted vs Actual Sale Price (Regression Tree)",
+    x = "Actual Sale Price",
+    y = "Predicted Sale Price"
+  )
+
+#Now compare normal saleprice to exp(log_dollars)
+test_rmse <- sqrt(mean((test_ames$SalePrice - e_pred_test)^2))
+
+# Mean Absolute Error, R-Squared
+#MAE
+mae <- mean(abs(test_ames$SalePrice - e_pred_test))
+
+
+#R-Squared
+sst <- sum((test_ames$SalePrice - mean(test_ames$SalePrice))^2)
+sse <- sum((test_ames$SalePrice - e_pred_test)^2)
+r_squared <- 1 - sse/sst
+
+
+cat("Complexity Parameter: ", best_cpfull)  
+
+cat("Test RMSE: ", test_rmse)
+
+cat("MAE: ", mae)
+
+cat("R-Squared: ", r_squared)
+
+head(imp, 5)
+```
+
+The regression tree was fit using all available covariates and pruned using cross-validated pruning to select an optimal tree size. Cross-validation favored a relatively small complexity parameter (0.0002), meaning there were several splits that made significant reductions in error.
+
+On the test dataset, the pruned regression tree achieved a root mean squared error of approximately 35,205, mean absolute error of 22,762, and an $R^2$ of 0.808, indicating reasonable predictive performance compared to the other models. We can interpret the value of RMSE and MAE in units of dollars, making interpretation fairly simple. 
+
+The key predictors highlighted by the tree as most influential to `SalePrice` were `OverallQual`, `Neighborhood`, `YearBuilt`, `ExterQual`, and `Foundation`, reinforcing findings from the exploratory data analysis. While the regression tree does not achieve the lowest possible prediction error among all models considered, it provides good interpretability and is a good candidate for summarizing the effect of multiple covariates of different types. 
+
+
+# Conclusion
+
+Four modeling approaches were evaluated on the Ames Housing dataset: LASSO regression, Ridge regression, Partial Least Squares (PLS), and CART. All models were trained on the same training dataset and evaluated on a held-out test set using RMSE, MAE, and $R^2$, ensuring a fair comparison of predictive performance.
+
+Among the linear models, LASSO regression performed best, achieving the lowest test RMSE and MAE and the highest $R^2$. This indicates that LASSO most effectively identified drivers of housing prices in Ames while generalizing well to unseen data. Its built-in variable selection allowed it to remove irrelevant or redundant predictors, which is especially important in a high-dimensional dataset with many correlated features, such as this one.
+
+Ridge regression, while stable in the presence of multicollinearity, kept all predictors and produced a much larger number of nonzero coefficients. This resulted in slightly worse predictive performance compared to LASSO, suggesting that shrinkage alone was insufficient and that eliminating uninformative variables improved generalization.
+
+PLS regression reduced dimensionality by projecting predictors into a smaller number of components and handled multicollinearity effectively. However, its test-set performance lagged behind LASSO, likely because compressing predictors into components diluted the influence of the most important individual variables, such as overall quality and living area.
+
+CART regression handled nonlinearities and interactions and provided intuitive decision rules, but it showed higher test error than the linear models. Despite pruning, the tree model has higher variance and reduced stability, which is common in tree-based methods when applied to datasets with many predictors and moderate sample sizes.
+
+Overall, LASSO regression had the best balance of accuracy, stability, and interpretability for this dataset. Its test performance suggests that housing prices in Ames are largely influenced by a subset of strong linear predictors, and that regularization with variable selection is particularly effective. For these reasons, LASSO was selected as the final and preferred model.
+
+
+# Team Contributions
+
+Catherine Ling: 
+
+  - EDA
+  - EDA slides  
+  - LASSO model
+  - LASSO slide
+  - LASSO report
+  - Ridge Regression model
+  - Ridge Regression slide
+  - Ridge Regression report
+  - Report conclusion
+
+Noah Ekness: 
+
+  - EDA
+  - PLS model
+  - PLS slide
+  - PLS report
+  - Introduction / overview slide
+  - Presentation
+
+Khaled Elhassan: 
+
+  - EDA
+  - CART model 
+  - CART slide
+  - CART report
+  - PLS refinement
+  - Report overview
+
+Troy Crockett: 
+
+  - EDA
+  - Initial Ridge model 
+
